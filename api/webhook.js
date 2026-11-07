@@ -1,6 +1,15 @@
 import fs from 'fs';
 import path from 'path';
 
+// Хранилище контекста диалогов (последние 10 сообщений на каждый чат)
+const chatHistories = new Map();
+
+// Время последней активности владельца в чате: chatId -> timestamp
+const lastOwnerActivity = new Map();
+
+// Если владелец писал в чат менее 3 минут назад — бот не вмешивается
+const OWNER_ACTIVE_COOLDOWN_MS = 3 * 60 * 1000;
+
 function getSystemPrompt() {
   try {
     const kbPath = path.join(process.cwd(), 'knowledge_base.txt');
@@ -10,7 +19,7 @@ function getSystemPrompt() {
   } catch (err) {
     console.warn('Could not read knowledge_base.txt:', err);
   }
-  return 'Ты — личный ИИ-секретарь владельца аккаунта. Отвечай кратко, по-человечески (1-2 предложения), что хозяин занят и ты передашь сообщение.';
+  return 'Ты общаешься в Telegram как живой, умный и естественный человек. Отвечай коротко, по-дружески, без роботизированных шаблонов.';
 }
 
 export default async function handler(req, res) {
@@ -29,7 +38,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ status: 'no_body' });
   }
 
-  // Получаем сообщение (прямое или из Telegram Business)
   const message = update.message || update.business_message;
   if (!message) {
     return res.status(200).json({ status: 'no_message' });
@@ -39,15 +47,29 @@ export default async function handler(req, res) {
   const chatId = message.chat?.id;
   const senderId = message.from?.id;
 
-  // 1. ВАЖНО: Если это Telegram Business, проверяем, кто автор!
-  // В приватном диалоге chat.id — это ID собеседника.
-  // Если senderId !== chatId, значит сообщение отправил САМ ВЛАДЕЛЕЦ (или бот от его имени).
-  // Ни в коем случае не отвечаем на исходящие сообщения владельца!
+  // 1. ПРОВЕРКА НА ИСХОДЯЩИЕ СООБЩЕНИЯ ВЛАДЕЛЬЦА:
+  // Если senderId !== chatId в бизнес-режиме, значит написал САМ ВЛАДЕЛЕЦ.
   if (businessConnId && senderId !== chatId) {
-    return res.status(200).json({ status: 'ignored_outgoing_owner_message' });
+    // Запоминаем, что владелец сейчас в этом чате онлайн и пишет сам!
+    lastOwnerActivity.set(chatId, Date.now());
+    
+    // Добавляем сообщение владельца в историю диалога
+    const text = message.text || message.caption || '';
+    if (text) {
+      addHistoryTurn(chatId, 'model', text);
+    }
+    return res.status(200).json({ status: 'owner_active_recorded' });
   }
 
-  // Игнорируем сообщения от ботов
+  // 2. ЕСЛИ ВЛАДЕЛЕЦ НЕДАВНО ПИСАЛ В ЭТОТ ЧАТ САМ (МЕНЬШЕ 3 МИНУТ НАЗАД) — БОТ НЕ МЕШАЕТ!
+  if (businessConnId) {
+    const lastActive = lastOwnerActivity.get(chatId) || 0;
+    if (Date.now() - lastActive < OWNER_ACTIVE_COOLDOWN_MS) {
+      return res.status(200).json({ status: 'owner_is_chatting_suppressed' });
+    }
+  }
+
+  // Игнорируем ботов
   if (message.from?.is_bot) {
     return res.status(200).json({ status: 'ignored_bot' });
   }
@@ -59,9 +81,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ status: 'no_text_or_photo' });
   }
 
-  // Если это прямой диалог с ботом и команда /start
+  // В прямом диалоге с ботом /start
   if (!businessConnId && userText === '/start') {
-    const welcome = "👋 Привет! Я личный ассистент на базе Gemini. Чем помочь?";
+    const welcome = "Салют! Я на связи. О чем поболтаем?";
     await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, welcome);
     return res.status(200).json({ status: 'ok' });
   }
@@ -69,13 +91,14 @@ export default async function handler(req, res) {
   try {
     sendTelegramAction(TELEGRAM_BOT_TOKEN, chatId, 'typing', businessConnId).catch(() => {});
 
-    const parts = [];
+    // Формируем части текущего запроса
+    const currentParts = [];
 
     if (hasPhoto) {
       const highestResPhoto = message.photo[message.photo.length - 1];
       const photoBase64 = await getTelegramFileBase64(TELEGRAM_BOT_TOKEN, highestResPhoto.file_id);
       if (photoBase64) {
-        parts.push({
+        currentParts.push({
           inline_data: {
             mime_type: 'image/jpeg',
             data: photoBase64
@@ -83,15 +106,19 @@ export default async function handler(req, res) {
         });
       }
       if (!userText) {
-        userText = 'Посмотри на фото и кратко ответь собеседнику.';
+        userText = 'Глянь на фото и отреагируй по-человечески.';
       }
     }
 
-    parts.push({ text: userText });
+    currentParts.push({ text: userText });
+
+    // Добавляем текущую реплику собеседника в историю
+    addHistoryTurn(chatId, 'user', userText);
+
+    // Получаем историю диалога для сохранения контекста
+    const contents = getHistoryContents(chatId, currentParts);
 
     const systemPrompt = getSystemPrompt();
-    
-    // Пробуем доступные модели Gemini (сначала быструю 3.5-flash-lite, затем 3.1-flash-lite)
     const modelsToTry = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
     let botReply = null;
 
@@ -105,15 +132,10 @@ export default async function handler(req, res) {
             system_instruction: {
               parts: [{ text: systemPrompt }]
             },
-            contents: [
-              {
-                role: 'user',
-                parts: parts
-              }
-            ],
+            contents: contents,
             generationConfig: {
-              temperature: 0.6,
-              maxOutputTokens: 150
+              temperature: 0.8,
+              maxOutputTokens: 250
             }
           })
         });
@@ -122,27 +144,59 @@ export default async function handler(req, res) {
           const data = await resp.json();
           botReply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
           if (botReply) break;
-        } else {
-          console.warn(`Model ${model} returned status ${resp.status}`);
         }
       } catch (e) {
-        console.warn(`Model ${model} failed:`, e.message);
+        console.warn(`Model ${model} error:`, e.message);
       }
     }
 
     if (!botReply) {
-      // Запасной лаконичный ответ, если Gemini временно недоступен
-      botReply = "Привет! Я ИИ-помощник, хозяин сейчас не у телефона. Я зафиксировал сообщение и передам ему, как освободится.";
+      return res.status(200).json({ status: 'no_reply_silence' });
     }
+
+    // Запоминаем ответ бота в историю
+    addHistoryTurn(chatId, 'model', botReply);
 
     await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, botReply, businessConnId);
 
     return res.status(200).json({ status: 'ok' });
   } catch (error) {
     console.error('Webhook error:', error);
-    // ВАЖНО: В режиме личных сообщений (Business) НИКОГДА не шлем технические ошибки в чат!
     return res.status(200).json({ status: 'error_suppressed' });
   }
+}
+
+function addHistoryTurn(chatId, role, text) {
+  if (!chatHistories.has(chatId)) {
+    chatHistories.set(chatId, []);
+  }
+  const history = chatHistories.get(chatId);
+  history.push({ role, text });
+  if (history.length > 8) {
+    history.shift();
+  }
+}
+
+function getHistoryContents(chatId, currentParts) {
+  const history = chatHistories.get(chatId) || [];
+  const contents = [];
+
+  // Добавляем предыдущие реплики
+  for (let i = 0; i < history.length - 1; i++) {
+    const item = history[i];
+    contents.push({
+      role: item.role,
+      parts: [{ text: item.text }]
+    });
+  }
+
+  // Последняя реплика пользователя включает фото (если есть)
+  contents.push({
+    role: 'user',
+    parts: currentParts
+  });
+
+  return contents;
 }
 
 async function getTelegramFileBase64(botToken, fileId) {
