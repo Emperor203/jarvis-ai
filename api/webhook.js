@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path from 'path';
 
-// Загрузка системного промпта / базы знаний
 function getSystemPrompt() {
   try {
     const kbPath = path.join(process.cwd(), 'knowledge_base.txt');
@@ -11,11 +10,10 @@ function getSystemPrompt() {
   } catch (err) {
     console.warn('Could not read knowledge_base.txt:', err);
   }
-  return 'Ты вежливый и полезный автоответчик в Telegram. Отвечай дружелюбно и по делу.';
+  return 'Ты вежливый и полезный виртуальный ассистент-автоответчик в Telegram. Отвечай дружелюбно, профессионально и по делу.';
 }
 
 export default async function handler(req, res) {
-  // Telegram Webhook отправляет только POST запросы
   if (req.method !== 'POST') {
     return res.status(200).send('Telegram Webhook endpoint is active. Use POST for updates.');
   }
@@ -23,37 +21,44 @@ export default async function handler(req, res) {
   const { TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, GEMINI_MODEL = 'gemini-3.5-flash' } = process.env;
 
   if (!TELEGRAM_BOT_TOKEN || !GEMINI_API_KEY) {
-    console.error('Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY');
     return res.status(500).send('Environment variables not configured');
   }
 
   const update = req.body;
-
-  // Проверяем, есть ли текстовое сообщение
-  if (!update || !update.message || !update.message.text) {
-    return res.status(200).json({ status: 'ok', detail: 'No text message to process' });
+  if (!update) {
+    return res.status(200).json({ status: 'ok' });
   }
 
-  const chatId = update.message.chat.id;
-  const userText = update.message.text.trim();
-  const userName = update.message.from?.first_name || 'друг';
+  // Поддержка как обычных сообщений (message), так и Telegram Business (business_message)
+  const message = update.message || update.business_message;
+  if (!message || !message.text) {
+    return res.status(200).json({ status: 'ok', detail: 'No text message' });
+  }
 
-  // Обработка команды /start
-  if (userText === '/start') {
+  // Игнорируем собственные исходящие сообщения (если сообщение отправлено владельцем аккаунта)
+  if (message.from && message.from.is_bot) {
+    return res.status(200).json({ status: 'ignored_bot' });
+  }
+
+  const chatId = message.chat.id;
+  const userText = message.text.trim();
+  const userName = message.from?.first_name || 'клиент';
+  const businessConnId = message.business_connection_id;
+
+  // Ответ на /start (только если это прямой диалог с ботом)
+  if (userText === '/start' && !businessConnId) {
     const welcomeText = 
       `👋 Здравствуйте, ${userName}!\n\n` +
       `Я виртуальный ассистент с искусственным интеллектом (Gemini).\n` +
-      `Готов ответить на любые ваши вопросы по услугам, графику работы, ценам и помочь вам.\n\n` +
-      `Просто напишите ваш вопрос сюда!`;
-    await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, welcomeText);
+      `Готов ответить на любые ваши вопросы и помочь вам.\n\n` +
+      `Напишите ваш вопрос прямо сюда!`;
+    await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, welcomeText, businessConnId);
     return res.status(200).json({ status: 'ok' });
   }
 
   try {
-    // Отправляем индикатор набора текста ("печатает...")
-    sendTelegramAction(TELEGRAM_BOT_TOKEN, chatId, 'typing').catch(() => {});
+    sendTelegramAction(TELEGRAM_BOT_TOKEN, chatId, 'typing', businessConnId).catch(() => {});
 
-    // Запрос к Google Gemini API
     const systemPrompt = getSystemPrompt();
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
@@ -77,66 +82,65 @@ export default async function handler(req, res) {
     });
 
     if (!geminiResponse.ok) {
-      const errBody = await geminiResponse.text();
-      console.error('Gemini API Error:', geminiResponse.status, errBody);
-      throw new Error(`Gemini error: ${geminiResponse.status}`);
+      const errText = await geminiResponse.text();
+      console.error('Gemini error:', geminiResponse.status, errText);
+      throw new Error(`Gemini status ${geminiResponse.status}`);
     }
 
     const geminiData = await geminiResponse.json();
     const botReply = geminiData.candidates?.[0]?.content?.parts?.[0]?.text 
       || 'Извините, не удалось сформировать ответ. Попробуйте еще раз.';
 
-    // Отправляем ответ в Telegram
-    await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, botReply);
+    await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, botReply, businessConnId);
 
     return res.status(200).json({ status: 'ok' });
   } catch (error) {
     console.error('Handler error:', error);
-    await sendTelegramMessage(
-      TELEGRAM_BOT_TOKEN, 
-      chatId, 
-      '⚠️ Извините, произошла временная ошибка при обработке запроса. Пожалуйста, попробуйте еще раз.'
-    ).catch(() => {});
     return res.status(200).json({ status: 'error', message: error.message });
   }
 }
 
-// Вспомогательная функция отправки сообщения в Telegram
-async function sendTelegramMessage(botToken, chatId, text) {
+async function sendTelegramMessage(botToken, chatId, text, businessConnId = null) {
   const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
   
-  // Пробуем отправить с Markdown, если не выйдет — отправляем чистым текстом
+  const payload = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: 'Markdown'
+  };
+
+  if (businessConnId) {
+    payload.business_connection_id = businessConnId;
+  }
+
   let response = await fetch(telegramUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: text,
-      parse_mode: 'Markdown'
-    })
+    body: JSON.stringify(payload)
   });
 
   if (!response.ok) {
+    delete payload.parse_mode;
     await fetch(telegramUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text
-      })
+      body: JSON.stringify(payload)
     });
   }
 }
 
-// Вспомогательная функция отправки статуса печати
-async function sendTelegramAction(botToken, chatId, action) {
+async function sendTelegramAction(botToken, chatId, action, businessConnId = null) {
   const telegramUrl = `https://api.telegram.org/bot${botToken}/sendChatAction`;
+  const payload = {
+    chat_id: chatId,
+    action: action
+  };
+  if (businessConnId) {
+    payload.business_connection_id = businessConnId;
+  }
   await fetch(telegramUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      action: action
-    })
+    body: JSON.stringify(payload)
   });
 }
