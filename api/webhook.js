@@ -10,7 +10,7 @@ const lastOwnerActivity = new Map();
 // Если владелец писал в чат менее 3 минут назад — бот не вмешивается
 const OWNER_ACTIVE_COOLDOWN_MS = 3 * 60 * 1000;
 
-function getSystemPrompt() {
+function getSystemPrompt(isDirectChat = false) {
   try {
     const kbPath = path.join(process.cwd(), 'knowledge_base.txt');
     if (fs.existsSync(kbPath)) {
@@ -19,7 +19,7 @@ function getSystemPrompt() {
   } catch (err) {
     console.warn('Could not read knowledge_base.txt:', err);
   }
-  return 'Ты общаешься в Telegram как живой, умный и естественный человек. Отвечай коротко, по-дружески, без роботизированных шаблонов.';
+  return 'Ты живой, умный собеседник в Telegram. Общайся естественно, по-дружески, без шаблонов.';
 }
 
 export default async function handler(req, res) {
