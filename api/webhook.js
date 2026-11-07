@@ -205,20 +205,54 @@ async function getTelegramFileBase64(botToken, fileId) {
 async function sendTelegramMessage(botToken, chatId, text, businessConnId = null) {
   const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
   
-  const payload = {
-    chat_id: chatId,
-    text: text
-  };
+  const chunks = splitTextIntoChunks(text, 4000);
 
-  if (businessConnId) {
-    payload.business_connection_id = businessConnId;
+  for (const chunk of chunks) {
+    const payload = {
+      chat_id: chatId,
+      text: chunk,
+      parse_mode: 'Markdown'
+    };
+
+    if (businessConnId) {
+      payload.business_connection_id = businessConnId;
+    }
+
+    let resp = await fetch(telegramUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    // Если разметка Markdown дала сбой — шлем чистым текстом, чтобы сообщение не потерялось
+    if (!resp.ok) {
+      delete payload.parse_mode;
+      await fetch(telegramUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    }
   }
+}
 
-  await fetch(telegramUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
+function splitTextIntoChunks(text, maxLen = 4000) {
+  if (text.length <= maxLen) return [text];
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) {
+      chunks.push(remaining);
+      break;
+    }
+    let splitIndex = remaining.lastIndexOf('\n', maxLen);
+    if (splitIndex === -1 || splitIndex < maxLen / 2) {
+      splitIndex = maxLen;
+    }
+    chunks.push(remaining.slice(0, splitIndex));
+    remaining = remaining.slice(splitIndex).trimStart();
+  }
+  return chunks;
 }
 
 async function sendTelegramAction(botToken, chatId, action, businessConnId = null) {
