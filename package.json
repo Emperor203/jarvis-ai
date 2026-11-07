@@ -1,0 +1,10 @@
+{
+  "name": "jarvis-ai",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram Bot Autoresponder with Gemini AI for Vercel",
+  "scripts": {
+    "start": "node api/webhook.js"
+  }
+}
