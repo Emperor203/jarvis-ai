@@ -10,71 +10,70 @@ function getSystemPrompt() {
   } catch (err) {
     console.warn('Could not read knowledge_base.txt:', err);
   }
-  return 'Ты вежливый и полезный виртуальный ассистент-автоответчик в Telegram. Ты умеешь анализировать как текст, так и фотографии, скриншоты, чеки и изображения товаров. Отвечай дружелюбно, профессионально и по делу.';
+  return 'Ты — личный ИИ-секретарь владельца аккаунта. Отвечай кратко, по-человечески (1-2 предложения), что хозяин занят и ты передашь сообщение.';
 }
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
-    return res.status(200).send('Telegram Webhook endpoint is active. Use POST for updates.');
+    return res.status(200).send('Webhook active');
   }
 
-  const { TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, GEMINI_MODEL = 'gemini-3.5-flash' } = process.env;
+  const { TELEGRAM_BOT_TOKEN, GEMINI_API_KEY } = process.env;
 
   if (!TELEGRAM_BOT_TOKEN || !GEMINI_API_KEY) {
-    return res.status(500).send('Environment variables not configured');
+    return res.status(200).json({ status: 'missing_keys' });
   }
 
   const update = req.body;
   if (!update) {
-    return res.status(200).json({ status: 'ok' });
+    return res.status(200).json({ status: 'no_body' });
   }
 
-  // Поддержка обычных сообщений (message) и Telegram Business (business_message)
+  // Получаем сообщение (прямое или из Telegram Business)
   const message = update.message || update.business_message;
   if (!message) {
-    return res.status(200).json({ status: 'ok' });
+    return res.status(200).json({ status: 'no_message' });
   }
 
-  // Игнорируем собственные исходящие сообщения от ботов
-  if (message.from && message.from.is_bot) {
+  const businessConnId = message.business_connection_id;
+  const chatId = message.chat?.id;
+  const senderId = message.from?.id;
+
+  // 1. ВАЖНО: Если это Telegram Business, проверяем, кто автор!
+  // В приватном диалоге chat.id — это ID собеседника.
+  // Если senderId !== chatId, значит сообщение отправил САМ ВЛАДЕЛЕЦ (или бот от его имени).
+  // Ни в коем случае не отвечаем на исходящие сообщения владельца!
+  if (businessConnId && senderId !== chatId) {
+    return res.status(200).json({ status: 'ignored_outgoing_owner_message' });
+  }
+
+  // Игнорируем сообщения от ботов
+  if (message.from?.is_bot) {
     return res.status(200).json({ status: 'ignored_bot' });
   }
 
-  const chatId = message.chat.id;
-  const businessConnId = message.business_connection_id;
-  const userName = message.from?.first_name || 'клиент';
-
-  // Проверяем наличие текста или подписи к фото
   let userText = (message.text || message.caption || '').trim();
   const hasPhoto = Array.isArray(message.photo) && message.photo.length > 0;
 
   if (!userText && !hasPhoto) {
-    return res.status(200).json({ status: 'ok', detail: 'Unsupported message type' });
+    return res.status(200).json({ status: 'no_text_or_photo' });
   }
 
-  // Ответ на /start (только в прямом диалоге)
-  if (userText === '/start' && !businessConnId && !hasPhoto) {
-    const welcomeText = 
-      `👋 Здравствуйте, ${userName}!\n\n` +
-      `Я виртуальный ассистент с искусственным интеллектом (Gemini).\n` +
-      `Я понимаю текстовые сообщения, а также **могу просматривать фотографии, скриншоты, товары и чеки**!\n\n` +
-      `Напишите вопрос или пришлите фото, и я помогу вам.`;
-    await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, welcomeText, businessConnId);
+  // Если это прямой диалог с ботом и команда /start
+  if (!businessConnId && userText === '/start') {
+    const welcome = "👋 Привет! Я личный ассистент на базе Gemini. Чем помочь?";
+    await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, welcome);
     return res.status(200).json({ status: 'ok' });
   }
 
   try {
     sendTelegramAction(TELEGRAM_BOT_TOKEN, chatId, 'typing', businessConnId).catch(() => {});
 
-    // Формируем контент для Gemini
     const parts = [];
 
-    // Если прислали фото — скачиваем его и передаем в Gemini как base64
     if (hasPhoto) {
-      // Берем самое высокое разрешение (последний элемент массива photo)
       const highestResPhoto = message.photo[message.photo.length - 1];
       const photoBase64 = await getTelegramFileBase64(TELEGRAM_BOT_TOKEN, highestResPhoto.file_id);
-      
       if (photoBase64) {
         parts.push({
           inline_data: {
@@ -83,62 +82,69 @@ export default async function handler(req, res) {
           }
         });
       }
-
       if (!userText) {
-        userText = 'Посмотри на изображение и подробно проанализируй его. Ответь и подскажи клиенту.';
+        userText = 'Посмотри на фото и кратко ответь собеседнику.';
       }
     }
 
     parts.push({ text: userText });
 
     const systemPrompt = getSystemPrompt();
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    
+    // Пробуем доступные модели Gemini (сначала быструю 3.5-flash-lite, затем 3.1-flash-lite)
+    const modelsToTry = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+    let botReply = null;
 
-    const geminiResponse = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        system_instruction: {
-          parts: [{ text: systemPrompt }]
-        },
-        contents: [
-          {
-            role: 'user',
-            parts: parts
-          }
-        ],
-        generationConfig: {
-          temperature: 0.7
+    for (const model of modelsToTry) {
+      try {
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+        const resp = await fetch(geminiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            system_instruction: {
+              parts: [{ text: systemPrompt }]
+            },
+            contents: [
+              {
+                role: 'user',
+                parts: parts
+              }
+            ],
+            generationConfig: {
+              temperature: 0.6,
+              maxOutputTokens: 150
+            }
+          })
+        });
+
+        if (resp.ok) {
+          const data = await resp.json();
+          botReply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+          if (botReply) break;
+        } else {
+          console.warn(`Model ${model} returned status ${resp.status}`);
         }
-      })
-    });
-
-    if (!geminiResponse.ok) {
-      const errText = await geminiResponse.text();
-      console.error('Gemini error:', geminiResponse.status, errText);
-      throw new Error(`Gemini status ${geminiResponse.status}`);
+      } catch (e) {
+        console.warn(`Model ${model} failed:`, e.message);
+      }
     }
 
-    const geminiData = await geminiResponse.json();
-    const botReply = geminiData.candidates?.[0]?.content?.parts?.[0]?.text 
-      || 'Извините, не удалось проанализировать сообщение. Попробуйте еще раз.';
+    if (!botReply) {
+      // Запасной лаконичный ответ, если Gemini временно недоступен
+      botReply = "Привет! Я ИИ-помощник, хозяин сейчас не у телефона. Я зафиксировал сообщение и передам ему, как освободится.";
+    }
 
     await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, botReply, businessConnId);
 
     return res.status(200).json({ status: 'ok' });
   } catch (error) {
-    console.error('Handler error:', error);
-    await sendTelegramMessage(
-      TELEGRAM_BOT_TOKEN, 
-      chatId, 
-      '⚠️ Извините, не удалось обработать запрос. Пожалуйста, попробуйте еще раз.',
-      businessConnId
-    ).catch(() => {});
-    return res.status(200).json({ status: 'error', message: error.message });
+    console.error('Webhook error:', error);
+    // ВАЖНО: В режиме личных сообщений (Business) НИКОГДА не шлем технические ошибки в чат!
+    return res.status(200).json({ status: 'error_suppressed' });
   }
 }
 
-// Загрузка фото из Telegram и конвертация в base64
 async function getTelegramFileBase64(botToken, fileId) {
   try {
     const fileInfoUrl = `https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`;
@@ -164,28 +170,18 @@ async function sendTelegramMessage(botToken, chatId, text, businessConnId = null
   
   const payload = {
     chat_id: chatId,
-    text: text,
-    parse_mode: 'Markdown'
+    text: text
   };
 
   if (businessConnId) {
     payload.business_connection_id = businessConnId;
   }
 
-  let response = await fetch(telegramUrl, {
+  await fetch(telegramUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
-
-  if (!response.ok) {
-    delete payload.parse_mode;
-    await fetch(telegramUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-  }
 }
 
 async function sendTelegramAction(botToken, chatId, action, businessConnId = null) {
