@@ -1,16 +1,16 @@
 import fs from 'fs';
 import path from 'path';
 
-// Хранилище контекста диалогов (последние 10 сообщений на каждый чат)
+// Хранилище контекста диалогов
 const chatHistories = new Map();
 
-// Время последней активности владельца в чате: chatId -> timestamp
-const lastOwnerActivity = new Map();
+// Время последней активности владельца во ВСЕМ Telegram (глобально)
+let lastGlobalOwnerActivity = 0;
 
-// Если владелец писал в чат менее 3 минут назад — бот не вмешивается
-const OWNER_ACTIVE_COOLDOWN_MS = 3 * 60 * 1000;
+// Если владелец отправлял хоть одно сообщение в Telegram менее 10 минут назад — считаем его ОНЛАЙН и бот МОЛЧИТ!
+const ONLINE_COOLDOWN_MS = 10 * 60 * 1000;
 
-function getSystemPrompt(isDirectChat = false) {
+function getSystemPrompt() {
   try {
     const kbPath = path.join(process.cwd(), 'knowledge_base.txt');
     if (fs.existsSync(kbPath)) {
@@ -19,7 +19,7 @@ function getSystemPrompt(isDirectChat = false) {
   } catch (err) {
     console.warn('Could not read knowledge_base.txt:', err);
   }
-  return 'Ты живой, умный собеседник в Telegram. Общайся естественно, по-дружески, без шаблонов.';
+  return 'Ты живой, умный, настоящий собеседник в Telegram. Общайся свободно, легко, по-дружески, без шаблонов.';
 }
 
 export default async function handler(req, res) {
@@ -47,29 +47,31 @@ export default async function handler(req, res) {
   const chatId = message.chat?.id;
   const senderId = message.from?.id;
 
-  // 1. ПРОВЕРКА НА ИСХОДЯЩИЕ СООБЩЕНИЯ ВЛАДЕЛЬЦА:
-  // Если senderId !== chatId в бизнес-режиме, значит написал САМ ВЛАДЕЛЕЦ.
+  // 1. ЕСЛИ СООБЩЕНИЕ ОТПРАВИЛ САМ ВЛАДЕЛЕЦ:
+  // (В бизнес-режиме: senderId !== chatId означает, что пишет владелец аккаунта)
   if (businessConnId && senderId !== chatId) {
-    // Запоминаем, что владелец сейчас в этом чате онлайн и пишет сам!
-    lastOwnerActivity.set(chatId, Date.now());
+    // Владелец прямо сейчас пишет в Telegram -> он ОНЛАЙН!
+    lastGlobalOwnerActivity = Date.now();
     
-    // Добавляем сообщение владельца в историю диалога
+    // Запоминаем реплику владельца в контекст
     const text = message.text || message.caption || '';
     if (text) {
       addHistoryTurn(chatId, 'model', text);
     }
-    return res.status(200).json({ status: 'owner_active_recorded' });
+    return res.status(200).json({ status: 'owner_sent_message_online_updated' });
   }
 
-  // 2. ЕСЛИ ВЛАДЕЛЕЦ НЕДАВНО ПИСАЛ В ЭТОТ ЧАТ САМ (МЕНЬШЕ 3 МИНУТ НАЗАД) — БОТ НЕ МЕШАЕТ!
+  // 2. ЖЕЛЕЗНОЕ ПРАВИЛО: ЕСЛИ ВЛАДЕЛЕЦ ОНЛАЙН — БОТ НЕ ОТВЕЧАЕТ!
+  // Если владелец писал что-либо в Telegram в течение последних 10 минут — бот молчит!
   if (businessConnId) {
-    const lastActive = lastOwnerActivity.get(chatId) || 0;
-    if (Date.now() - lastActive < OWNER_ACTIVE_COOLDOWN_MS) {
-      return res.status(200).json({ status: 'owner_is_chatting_suppressed' });
+    const timeSinceLastOwnerAction = Date.now() - lastGlobalOwnerActivity;
+    if (timeSinceLastOwnerAction < ONLINE_COOLDOWN_MS) {
+      console.log(`[SILENCE] Owner was active ${Math.round(timeSinceLastOwnerAction / 1000)}s ago. Bot will not reply.`);
+      return res.status(200).json({ status: 'owner_is_online_bot_silent' });
     }
   }
 
-  // Игнорируем ботов
+  // Игнорируем других ботов
   if (message.from?.is_bot) {
     return res.status(200).json({ status: 'ignored_bot' });
   }
@@ -81,7 +83,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ status: 'no_text_or_photo' });
   }
 
-  // В прямом диалоге с ботом /start
+  // Если это личный диалог с ботом
   if (!businessConnId && userText === '/start') {
     const welcome = "Салют! Я на связи. О чем поболтаем?";
     await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, welcome);
@@ -91,7 +93,6 @@ export default async function handler(req, res) {
   try {
     sendTelegramAction(TELEGRAM_BOT_TOKEN, chatId, 'typing', businessConnId).catch(() => {});
 
-    // Формируем части текущего запроса
     const currentParts = [];
 
     if (hasPhoto) {
@@ -112,10 +113,7 @@ export default async function handler(req, res) {
 
     currentParts.push({ text: userText });
 
-    // Добавляем текущую реплику собеседника в историю
     addHistoryTurn(chatId, 'user', userText);
-
-    // Получаем историю диалога для сохранения контекста
     const contents = getHistoryContents(chatId, currentParts);
 
     const systemPrompt = getSystemPrompt();
@@ -154,9 +152,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ status: 'no_reply_silence' });
     }
 
-    // Запоминаем ответ бота в историю
     addHistoryTurn(chatId, 'model', botReply);
-
     await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, botReply, businessConnId);
 
     return res.status(200).json({ status: 'ok' });
@@ -181,7 +177,6 @@ function getHistoryContents(chatId, currentParts) {
   const history = chatHistories.get(chatId) || [];
   const contents = [];
 
-  // Добавляем предыдущие реплики
   for (let i = 0; i < history.length - 1; i++) {
     const item = history[i];
     contents.push({
@@ -190,7 +185,6 @@ function getHistoryContents(chatId, currentParts) {
     });
   }
 
-  // Последняя реплика пользователя включает фото (если есть)
   contents.push({
     role: 'user',
     parts: currentParts
