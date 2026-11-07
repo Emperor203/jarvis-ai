@@ -48,29 +48,17 @@ export default async function handler(req, res) {
   const chatId = message.chat?.id;
   const senderId = message.from?.id;
 
-  // 1. ЕСЛИ СООБЩЕНИЕ ОТПРАВИЛ САМ ВЛАДЕЛЕЦ:
-  // (В бизнес-режиме: senderId !== chatId означает, что пишет владелец аккаунта)
+  // 1. ИГНОРИРУЕМ ИСХОДЯЩИЕ СООБЩЕНИЯ САМОГО ВЛАДЕЛЬЦА:
+  // Если пишет сам владелец — бот просто запоминает реплику в контекст и не отвечает самому себе.
   if (businessConnId && senderId !== chatId) {
-    // Владелец прямо сейчас пишет в Telegram -> он ОНЛАЙН!
-    lastGlobalOwnerActivity = Date.now();
-    
-    // Запоминаем реплику владельца в контекст
     const text = message.text || message.caption || '';
     if (text) {
       addHistoryTurn(chatId, 'model', text);
     }
-    return res.status(200).json({ status: 'owner_sent_message_online_updated' });
+    return res.status(200).json({ status: 'ignored_outgoing' });
   }
 
-  // 2. ЖЕЛЕЗНОЕ ПРАВИЛО: ЕСЛИ ВЛАДЕЛЕЦ ОНЛАЙН — БОТ НЕ ОТВЕЧАЕТ!
-  // Если владелец писал что-либо в Telegram в течение последних 10 минут — бот молчит!
-  if (businessConnId) {
-    const timeSinceLastOwnerAction = Date.now() - lastGlobalOwnerActivity;
-    if (timeSinceLastOwnerAction < ONLINE_COOLDOWN_MS) {
-      console.log(`[SILENCE] Owner was active ${Math.round(timeSinceLastOwnerAction / 1000)}s ago. Bot will not reply.`);
-      return res.status(200).json({ status: 'owner_is_online_bot_silent' });
-    }
-  }
+  // 2. НА ВСЕ ВХОДЯЩИЕ СООБЩЕНИЯ БОТ ОТВЕЧАЕТ МОМЕНТАЛЬНО (БЕЗ ЗАДЕРЖЕК)!
 
   // Игнорируем других ботов
   if (message.from?.is_bot) {
