@@ -30,11 +30,18 @@ function detectAndLockChatLanguage(chatId, text) {
   return prevLang;
 }
 
-function getSystemPrompt() {
+let cachedKb = null;
+
+function getSystemPrompt(isHeavyTask = true) {
+  if (!isHeavyTask) {
+    return 'Ты — живой, умный собеседник Jarvis в Telegram. Отвечай коротко (1–2 живых предложения), естественно, без занудства и без фраз «передам хозяину».';
+  }
+  if (cachedKb) return cachedKb;
   try {
     const kbPath = path.join(process.cwd(), 'knowledge_base.txt');
     if (fs.existsSync(kbPath)) {
-      return fs.readFileSync(kbPath, 'utf-8');
+      cachedKb = fs.readFileSync(kbPath, 'utf-8');
+      return cachedKb;
     }
   } catch (err) {
     console.warn('Could not read knowledge_base.txt:', err);
@@ -183,13 +190,22 @@ export default async function handler(req, res) {
       ? '\n\nТЕКУЩИЙ ЯЗЫК ДИАЛОГА: УЗБЕКСКИЙ. Отвечай строго только на узбекском языке!'
       : '\n\nТЕКУЩИЙ ЯЗЫК ДИАЛОГА: РУССКИЙ. Отвечай строго ТОЛЬКО на русском языке, даже если прислали короткое слово на латинице вроде "Alo" или "Ok".';
 
-    const systemPrompt = getSystemPrompt() + langDirective;
-    const modelsToTry = [
-      { id: 'gemini-3.5-flash', noThinking: true },
-      { id: 'gemini-3.5-flash-lite', noThinking: false },
-      { id: 'gemini-3.8-flash', noThinking: true },
-      { id: 'gemini-3.1-flash-lite', noThinking: false }
-    ];
+    // Обычная болтовня идет по сверхбыстрому пути; игры, код, фото и видео — по мощному
+    const isHeavyTask = hasPhoto || hasVideo || /(игр|сделай|создай|напиши|приложен|терминал|код|html|css|python|скрипт|виджет|кликер|змейк|гонк|шахмат|тетрис|матриц|бонсай|2048|калькулятор|таймер|доработ|добавь|измени|почини|исправ|сайт|мини-?апп|мини-?игр|game|app|code|\bjs\b)/i.test(userText);
+
+    const systemPrompt = getSystemPrompt(isHeavyTask) + langDirective;
+    const modelsToTry = isHeavyTask
+      ? [
+          { id: 'gemini-3.5-flash', noThinking: true, timeout: 18000 },
+          { id: 'gemini-3.5-flash-lite', noThinking: false, timeout: 15000 },
+          { id: 'gemini-3.8-flash', noThinking: true, timeout: 18000 },
+          { id: 'gemini-3.1-flash-lite', noThinking: false, timeout: 15000 }
+        ]
+      : [
+          { id: 'gemini-3.5-flash-lite', noThinking: false, timeout: 6000 },
+          { id: 'gemini-3.5-flash', noThinking: true, timeout: 8000 },
+          { id: 'gemini-3.1-flash-lite', noThinking: false, timeout: 8000 }
+        ];
     let botReply = null;
 
     for (const modelCfg of modelsToTry) {
@@ -197,7 +213,7 @@ export default async function handler(req, res) {
         const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelCfg.id}:generateContent?key=${GEMINI_API_KEY}`;
         const genConfig = {
           temperature: 0.7,
-          maxOutputTokens: 4096
+          maxOutputTokens: isHeavyTask ? 4096 : 350
         };
         if (modelCfg.noThinking) {
           genConfig.thinkingConfig = { thinkingBudget: 0 };
@@ -206,6 +222,7 @@ export default async function handler(req, res) {
         const resp = await fetch(geminiUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(modelCfg.timeout),
           body: JSON.stringify({
             system_instruction: {
               parts: [{ text: systemPrompt }]
