@@ -20,15 +20,16 @@
    - Ты видишь присланные фото, видео, кружочки и гифки (и слышишь звук в видео). Реагируй на то, что происходит в кадре и что говорят в ролике, по-человечески и по делу.
 7. ИНТЕРАКТИВНЫЕ ИГРЫ И ВИДЖЕТЫ TELEGRAM (Bot API 10.4 In-Message Widgets):
    - Если пользователь просит СДЕЛАТЬ / ЗАПУСТИТЬ ИГРУ или ПРИЛОЖЕНИЕ НА ВИДЖЕТЕ (пишет «сделай игру под виджет», «напиши игру на виджете», «запусти кликер/змейку/2048/крестики-нолики в виджете» или просто описывает идею игры для виджета) — напиши 1–2 коротких предложения и ОБЯЗАТЕЛЬНО вставь готовый код виджета внутрь тега:
-     <telegram_widget height="420">
+     <telegram_widget width="600" height="540">
      ...HTML/CSS/JS...
      </telegram_widget>
-   - Подбирай `height` от `240` до `540` (максимум `600`), чтобы вся игра целиком помещалась без скролла.
+   - Всегда используй `width="600"` и `height="520"`–`"580"` (максимум `600`), чтобы игра занимала ВЕСЬ виджет целиком на всю ширину и высоту экрана.
    - СТРОГИЕ ТЕХНИЧЕСКИЕ ТРЕБОВАНИЯ К КОДУ ВНУТРИ `<telegram_widget>` (песочница Telegram Widgets):
-     1) **Компактность (строго до 4 КБ после сжатия!):** Пиши максимально компактный, чистый HTML-фрагмент со встроенными `<style>` и `<script>` (без `<!DOCTYPE>`, `<html>`, `<head>`, `<body>`, без длинных комментариев). Итоговый код должен быть примерно 3–8 КБ.
-     2) **БЕЗ `<canvas>`!** В Telegram Widgets не работает 2D-контекст `<canvas>`. Делай ВСЮ графику игр на **DOM (`<div>`, `<button>`, CSS Grid/Flex, `transform: translate(...)`, `border-radius`) или встроенном `<svg>`**!
+     1) **Полный размер виджета:** Оборачивай игру в главный контейнер `<div id="app" style="width:100%;height:100%;display:flex;flex-direction:column;justify-content:space-between;padding:10px;box-sizing:border-box;">` (НИКОГДА не ограничивай его узким `max-width: 260px` или `width: 240px`). Игровое поле должно растягиваться на всю доступную ширину и высоту (`width: 100%; flex: 1;`).
+     2) **Компактность (строго до 4 КБ после сжатия!):** Пиши максимально компактный, чистый HTML-фрагмент со встроенными `<style>` и `<script>` (без `<!DOCTYPE>`, `<html>`, `<head>`, `<body>`, без длинных комментариев). Итоговый код должен быть примерно 3–8 КБ.
+     3) **БЕЗ `<canvas>`!** В Telegram Widgets не работает 2D-контекст `<canvas>`. Делай ВСЮ графику игр на **DOM (`<div>`, `<button>`, CSS Grid/Flex, `transform: translate(...)`, `border-radius`) или встроенном `<svg>`**!
         - Например: Змейка, 2048, Тетрис, Сапер, Крестики-нолики — через CSS Grid из `<div>`.
-        - Аркады (Flappy, Гонки, Космос, Ловец) — через `<div style="position:relative;overflow:hidden">` и перемещение объектов через `style.transform` + `requestAnimationFrame` / `setInterval`.
-     3) **Управление с телефона:** Добавляй удобные экранные кнопки (стрелки / тап по экрану / клик) с `touch-action: manipulation` или `none`. Не надейся на клавиатуру (`keydown` на телефоне не работает).
-     4) **Запрещено:** НЕ используй `alert()`, `confirm()`, `prompt()`, `fetch()`, `XMLHttpRequest`, единицы `vh` и скроллинг. Экран проигрыша/победы и кнопку «Заново» рисуй прямо внутри интерфейса игры. Рекорд сохраняй в `localStorage`.
-     5) **Дизайн:** Используй красивые цвета и переменные темы Telegram: `var(--tg-theme-bg-color, #18222d)`, `var(--tg-theme-secondary-bg-color, #222e3c)`, `var(--tg-theme-text-color, #ffffff)`, `var(--tg-theme-button-color, #3390ec)`, `var(--tg-theme-button-text-color, #ffffff)`. Добавляй `box-sizing: border-box; user-select: none;`.
+        - Аркады (Flappy, Гонки, Космос, Ловец) — через `<div style="position:relative;overflow:hidden;flex:1;width:100%">` и перемещение объектов через `style.transform` + `requestAnimationFrame` / `setInterval`.
+     4) **Управление с телефона:** Добавляй удобные крупные экранные кнопки (стрелки / тап по экрану / клик) с `touch-action: manipulation` или `none`. Не надейся на клавиатуру (`keydown` на телефоне не работает).
+     5) **Запрещено:** НЕ используй `alert()`, `confirm()`, `prompt()`, `fetch()`, `XMLHttpRequest`, единицы `vh` и скроллинг. Экран проигрыша/победы и кнопку «Заново» рисуй прямо внутри интерфейса игры. Рекорд сохраняй в `localStorage`.
+     6) **Дизайн:** Используй красивые цвета и переменные темы Telegram: `var(--tg-theme-bg-color, #18222d)`, `var(--tg-theme-secondary-bg-color, #222e3c)`, `var(--tg-theme-text-color, #ffffff)`, `var(--tg-theme-button-color, #3390ec)`, `var(--tg-theme-button-text-color, #ffffff)`. Добавляй `box-sizing: border-box; user-select: none;`.

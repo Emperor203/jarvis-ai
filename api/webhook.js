@@ -215,8 +215,9 @@ export default async function handler(req, res) {
 
       const widthMatch = attrs.match(/width=["']?(\d+)["']?/i);
       const heightMatch = attrs.match(/height=["']?(\d+)["']?/i);
-      const width = widthMatch ? parseInt(widthMatch[1], 10) : 0;
-      const height = heightMatch ? parseInt(heightMatch[1], 10) : 400;
+      // Всегда ставим максимальную ширину виджета (600, Telegram сам подгонит под ширину экрана)
+      const width = widthMatch ? Math.max(parseInt(widthMatch[1], 10), 480) : 600;
+      const height = heightMatch ? Math.min(Math.max(parseInt(heightMatch[1], 10), 460), 600) : 540;
 
       const textOutside = botReply.replace(widgetMatch[0], '').trim();
       addHistoryTurn(chatId, 'model', textOutside ? `${textOutside} [Отправлен интерактивный виджет]` : '[Отправлен интерактивный виджет]');
@@ -412,10 +413,11 @@ async function sendTelegramAction(botToken, chatId, action, businessConnId = nul
   });
 }
 
-async function sendTelegramWidget(botToken, chatId, html, width = 0, height = 400, businessConnId = null) {
+async function sendTelegramWidget(botToken, chatId, html, width = 600, height = 540, businessConnId = null) {
   try {
-    // Заменяем запрещенные в виджетах единицы vh на % и убираем NUL-байты
-    let cleanHtml = html
+    // Заменяем запрещенные в виджетах единицы vh на %, убираем NUL-байты и задаем полную ширину/высоту
+    const baseReset = '<style>html,body{margin:0;padding:0;width:100%;height:100%;box-sizing:border-box;overflow:hidden;}</style>';
+    let cleanHtml = baseReset + html
       .replace(/\0/g, '')
       .replace(/\b(\d+)vh\b/gi, '$1%');
 
