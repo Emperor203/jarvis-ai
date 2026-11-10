@@ -2,8 +2,33 @@ import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 
-// Хранилище контекста диалогов
+// Хранилище контекста диалогов и текущего языка чата
 const chatHistories = new Map();
+const chatLanguages = new Map();
+
+function detectAndLockChatLanguage(chatId, text) {
+  const clean = (text || '').trim();
+  const prevLang = chatLanguages.get(chatId) || 'ru';
+
+  // Явные маркеры узбекского языка (узбекская кириллица или явные узбекские фразы)
+  const hasUzbekCyrillic = /[ўқғҳ]/i.test(clean);
+  const uzbekLatinMatches = clean.match(/\b(salom|assalomu|qalay|qaleysan|qanday|nima|gaplar|menga|sen|men|uchun|bilan|kerak|bo'ldi|yaxshi|rahmat|yoz|qilib|ber|yig'ib|o'zbek|o'zbekcha|aka|uka)\b/gi);
+  const wordCount = clean.split(/\s+/).filter(Boolean).length;
+
+  if (hasUzbekCyrillic || (uzbekLatinMatches && (uzbekLatinMatches.length >= 2 || (uzbekLatinMatches.length === 1 && wordCount >= 2 && !/[а-яё]/i.test(clean))))) {
+    chatLanguages.set(chatId, 'uz');
+    return 'uz';
+  }
+
+  // Явные маркеры русского языка (кириллица без узбекских букв)
+  if (/[а-яё]{3,}/i.test(clean) && !hasUzbekCyrillic) {
+    chatLanguages.set(chatId, 'ru');
+    return 'ru';
+  }
+
+  // Короткие неоднозначные слова ("Alo", "Ok", "123", стикеры/эмодзи) НЕ меняют язык диалога!
+  return prevLang;
+}
 
 function getSystemPrompt() {
   try {
@@ -147,7 +172,12 @@ export default async function handler(req, res) {
     addHistoryTurn(chatId, 'user', userText);
     const contents = getHistoryContents(chatId, currentParts);
 
-    const systemPrompt = getSystemPrompt();
+    const activeLang = detectAndLockChatLanguage(chatId, userText);
+    const langDirective = activeLang === 'uz'
+      ? '\n\nТЕКУЩИЙ ЯЗЫК ДИАЛОГА: УЗБЕКСКИЙ. Отвечай строго только на узбекском языке!'
+      : '\n\nТЕКУЩИЙ ЯЗЫК ДИАЛОГА: РУССКИЙ. Отвечай строго ТОЛЬКО на русском языке, даже если прислали короткое слово на латинице вроде "Alo" или "Ok".';
+
+    const systemPrompt = getSystemPrompt() + langDirective;
     const modelsToTry = [
       { id: 'gemini-3.5-flash', noThinking: true },
       { id: 'gemini-3.5-flash-lite', noThinking: false },
