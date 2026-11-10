@@ -213,11 +213,9 @@ export default async function handler(req, res) {
       // Убираем случайные ```html ... ``` внутри тега
       widgetHtml = widgetHtml.replace(/^```(?:html)?\s*/i, '').replace(/\s*```$/i, '').trim();
 
-      const widthMatch = attrs.match(/width=["']?(\d+)["']?/i);
-      const heightMatch = attrs.match(/height=["']?(\d+)["']?/i);
-      // Всегда ставим максимальную ширину виджета (600, Telegram сам подгонит под ширину экрана)
-      const width = widthMatch ? Math.max(parseInt(widthMatch[1], 10), 480) : 600;
-      const height = heightMatch ? Math.min(Math.max(parseInt(heightMatch[1], 10), 460), 600) : 540;
+      // Всегда задаем максимально допустимый размер виджета Telegram (600x600)
+      const width = 600;
+      const height = 600;
 
       const textOutside = botReply.replace(widgetMatch[0], '').trim();
       addHistoryTurn(chatId, 'model', textOutside ? `${textOutside} [Отправлен интерактивный виджет]` : '[Отправлен интерактивный виджет]');
@@ -227,23 +225,29 @@ export default async function handler(req, res) {
       }
 
       const widgetResult = await sendTelegramWidget(TELEGRAM_BOT_TOKEN, chatId, widgetHtml, width, height, businessConnId);
+
+      // Готовим ссылку на полноэкранный режим Mini App (/api/play?g=...)
+      const host = req.headers['x-forwarded-host'] || req.headers.host || 'jarvis-ai-bice-one.vercel.app';
+      const proto = req.headers['x-forwarded-proto'] || 'https';
+      const cleanForUrl = widgetHtml.replace(/\0/g, '').replace(/\b(\d+)vh\b/gi, '$1%');
+      const encodedGame = zlib.deflateRawSync(cleanForUrl, { level: 9 }).toString('base64url');
+      const fullScreenUrl = `${proto}://${host}/api/play?g=${encodedGame}`;
+
       if (!widgetResult.ok) {
         console.warn('sendWidget failed:', widgetResult.description);
-        // Если это Business-чат (где Telegram может ограничивать виджеты) или превышен размер
-        if (businessConnId) {
-          await sendTelegramMessage(
-            TELEGRAM_BOT_TOKEN,
-            chatId,
-            `⚠️ Интерактивные виджеты Telegram пока работают только в личке самого бота (@jarvis_otvet_bot). Отправляю кодом:\n\n\`\`\`html\n${widgetHtml}\n\`\`\``,
-            businessConnId
-          );
+        if (!businessConnId && encodedGame.length <= 4500) {
+          await sendTelegramWebAppButton(TELEGRAM_BOT_TOKEN, chatId, 'Запускай игру на весь экран 👇', fullScreenUrl);
         } else {
           await sendTelegramMessage(
             TELEGRAM_BOT_TOKEN,
             chatId,
-            `⚠️ Не удалось запустить виджет (${widgetResult.description || 'ограничение размера 4 КБ'}). Вот готовый HTML-код:\n\n\`\`\`html\n${widgetHtml}\n\`\`\``
+            `⚠️ Виджет не запустился (${widgetResult.description || 'ограничение Telegram'}). Вот готовый HTML-код:\n\n\`\`\`html\n${widgetHtml}\n\`\`\``,
+            businessConnId
           );
         }
+      } else if (!businessConnId && encodedGame.length <= 4500) {
+        // Если виджет отправился — сразу даем кнопку для разворачивания НА ВЕСЬ ЭКРАН (и со скриншотами!)
+        await sendTelegramWebAppButton(TELEGRAM_BOT_TOKEN, chatId, 'Хочешь на весь экран и без ограничений? Жми 👇', fullScreenUrl);
       }
     } else {
       addHistoryTurn(chatId, 'model', botReply);
@@ -465,5 +469,27 @@ async function answerTelegramWidgetQuery(botToken, widgetQueryId) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ widget_query_id: widgetQueryId })
+  });
+}
+
+async function sendTelegramWebAppButton(botToken, chatId, text, webAppUrl) {
+  const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  await fetch(telegramUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: text,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: '🎮 Открыть на весь экран',
+              web_app: { url: webAppUrl }
+            }
+          ]
+        ]
+      }
+    })
   });
 }
