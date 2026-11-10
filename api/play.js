@@ -13,18 +13,39 @@ export default function handler(req, res) {
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Jarvis Game</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
     html, body {
       margin: 0;
       padding: 0;
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background: var(--tg-theme-bg-color, #17212b);
+      overscroll-behavior: none;
+      touch-action: none;
+      background: var(--tg-theme-bg-color, #111822);
       color: var(--tg-theme-text-color, #ffffff);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    #mobile-shell {
+      width: 100%;
+      max-width: 500px;
+      height: 100%;
+      padding-top: calc(var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px));
+      padding-bottom: max(var(--tg-safe-area-inset-bottom, 0px), 8px);
+      padding-left: var(--tg-safe-area-inset-left, 0px);
+      padding-right: var(--tg-safe-area-inset-right, 0px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
     }
   </style>
   <script>
@@ -33,6 +54,9 @@ export default function handler(req, res) {
       if (tg) {
         tg.ready();
         tg.expand();
+        if (typeof tg.disableVerticalSwipes === 'function') {
+          tg.disableVerticalSwipes();
+        }
         if (typeof tg.requestFullscreen === 'function') {
           tg.requestFullscreen();
         }
@@ -41,7 +65,9 @@ export default function handler(req, res) {
   </script>
 </head>
 <body>
+  <div id="mobile-shell">
 ${html}
+  </div>
 </body>
 </html>`;
 
