@@ -58,6 +58,12 @@ export default async function handler(req, res) {
     return res.status(200).json({ status: 'no_body' });
   }
 
+  // Обработка нажатия кнопки «📁 Файлом для друга» (экспорт HTML игры)
+  if (update.callback_query?.data === 'export_html') {
+    await handleExportHtmlCallback(TELEGRAM_BOT_TOKEN, update.callback_query);
+    return res.status(200).json({ status: 'exported_html' });
+  }
+
   const message = update.message || update.business_message;
   if (!message) {
     return res.status(200).json({ status: 'no_message' });
@@ -434,6 +440,16 @@ async function sendTelegramAction(botToken, chatId, action, businessConnId = nul
 async function sendTelegramWebAppButton(botToken, chatId, text, webAppUrl) {
   try {
     const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+    const shareRow = [];
+
+    if (webAppUrl.length <= 1800) {
+      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(webAppUrl)}&text=${encodeURIComponent('Зацени игру от Jarvis! 🎮')}`;
+      shareRow.push({ text: '📤 Поделиться ссылкой', url: shareUrl });
+      shareRow.push({ text: '📁 Файлом', callback_data: 'export_html' });
+    } else {
+      shareRow.push({ text: '📤 Поделиться с другом (файл)', callback_data: 'export_html' });
+    }
+
     const payload = {
       chat_id: chatId,
       text: text,
@@ -445,7 +461,8 @@ async function sendTelegramWebAppButton(botToken, chatId, text, webAppUrl) {
               text: '🎮 Запустить на весь экран',
               web_app: { url: webAppUrl }
             }
-          ]
+          ],
+          shareRow
         ]
       }
     };
@@ -470,6 +487,54 @@ async function sendTelegramWebAppButton(botToken, chatId, text, webAppUrl) {
   } catch (err) {
     console.error('sendTelegramWebAppButton error:', err);
     return { ok: false, description: err.message };
+  }
+}
+
+async function handleExportHtmlCallback(botToken, cq) {
+  try {
+    // Отвечаем на нажатие кнопки, чтобы убрать часики
+    await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: cq.id, text: 'Готовлю файл для пересылки...' })
+    });
+
+    const rows = cq.message?.reply_markup?.inline_keyboard || [];
+    let webAppUrl = null;
+    for (const row of rows) {
+      for (const btn of row) {
+        if (btn.web_app?.url) {
+          webAppUrl = btn.web_app.url;
+          break;
+        }
+      }
+      if (webAppUrl) break;
+    }
+
+    if (!webAppUrl) return;
+
+    const urlObj = new URL(webAppUrl);
+    const b = urlObj.searchParams.get('b');
+    const g = urlObj.searchParams.get('g');
+    let html = '';
+
+    if (b) {
+      html = zlib.brotliDecompressSync(Buffer.from(b, 'base64url')).toString('utf-8');
+    } else if (g) {
+      html = zlib.inflateRawSync(Buffer.from(g, 'base64url')).toString('utf-8');
+    }
+
+    if (!html) return;
+
+    await sendTelegramDocument(
+      botToken,
+      cq.message.chat.id,
+      html,
+      'jarvis_game.html',
+      'Перешли этот файл другу — откроется на любом телефоне и ПК! 🎮'
+    );
+  } catch (err) {
+    console.error('handleExportHtmlCallback error:', err);
   }
 }
 

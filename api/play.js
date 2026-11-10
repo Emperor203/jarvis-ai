@@ -36,6 +36,7 @@ export default function handler(req, res) {
       display: flex;
       justify-content: center;
       align-items: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
     #mobile-shell {
       width: 100%;
@@ -48,6 +49,38 @@ export default function handler(req, res) {
       display: flex;
       flex-direction: column;
       overflow: hidden;
+    }
+    #jarvis-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+    #jarvis-brand {
+      opacity: 0.75;
+      font-weight: 600;
+    }
+    #share-btn {
+      background: var(--tg-theme-button-color, #3b82f6);
+      color: var(--tg-theme-button-text-color, #ffffff);
+      border: none;
+      border-radius: 8px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #game-root {
+      flex: 1;
+      width: 100%;
+      min-height: 0;
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
     }
   </style>
   <script>
@@ -68,8 +101,43 @@ export default function handler(req, res) {
 </head>
 <body>
   <div id="mobile-shell">
+    <div id="jarvis-bar">
+      <span id="jarvis-brand">⚡ Jarvis</span>
+      <button id="share-btn" type="button">📤 Поделиться</button>
+    </div>
+    <div id="game-root">
 ${html}
+    </div>
   </div>
+  <script>
+    (function() {
+      const btn = document.getElementById('share-btn');
+      if (!btn) return;
+      btn.addEventListener('click', async function() {
+        const gameUrl = window.location.href;
+        const shareLink = 'https://t.me/share/url?url=' + encodeURIComponent(gameUrl) + '&text=' + encodeURIComponent('Зацени игру! 🎮');
+        try {
+          const tg = window.Telegram && window.Telegram.WebApp;
+          if (gameUrl.length <= 2000 && tg && typeof tg.openTelegramLink === 'function') {
+            tg.openTelegramLink(shareLink);
+            return;
+          }
+          if (navigator.share) {
+            await navigator.share({ title: 'Игра от Jarvis', url: gameUrl });
+            return;
+          }
+        } catch (e) {}
+        try {
+          await navigator.clipboard.writeText(gameUrl);
+          btn.textContent = '✅ Скопировано!';
+          setTimeout(() => { btn.textContent = '📤 Поделиться'; }, 2000);
+        } catch (e) {
+          btn.textContent = '📁 Скачай файлом в чате';
+          setTimeout(() => { btn.textContent = '📤 Поделиться'; }, 2500);
+        }
+      });
+    })();
+  </script>
 </body>
 </html>`;
 
