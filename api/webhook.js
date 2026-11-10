@@ -154,12 +154,25 @@ export default async function handler(req, res) {
     const contents = getHistoryContents(chatId, currentParts);
 
     const systemPrompt = getSystemPrompt();
-    const modelsToTry = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+    const modelsToTry = [
+      { id: 'gemini-3.5-flash', noThinking: true },
+      { id: 'gemini-3.5-flash-lite', noThinking: false },
+      { id: 'gemini-3.8-flash', noThinking: true },
+      { id: 'gemini-3.1-flash-lite', noThinking: false }
+    ];
     let botReply = null;
 
-    for (const model of modelsToTry) {
+    for (const modelCfg of modelsToTry) {
       try {
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelCfg.id}:generateContent?key=${GEMINI_API_KEY}`;
+        const genConfig = {
+          temperature: 0.7,
+          maxOutputTokens: 4096
+        };
+        if (modelCfg.noThinking) {
+          genConfig.thinkingConfig = { thinkingBudget: 0 };
+        }
+
         const resp = await fetch(geminiUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -168,20 +181,23 @@ export default async function handler(req, res) {
               parts: [{ text: systemPrompt }]
             },
             contents: contents,
-            generationConfig: {
-              temperature: 0.7,
-              maxOutputTokens: 4096
-            }
+            generationConfig: genConfig
           })
         });
 
         if (resp.ok) {
           const data = await resp.json();
-          botReply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+          const parts = data.candidates?.[0]?.content?.parts || [];
+          // Собираем ВСЕ текстовые части ответа (исключая внутренние мысли thought)
+          botReply = parts
+            .filter(p => !p.thought && typeof p.text === 'string')
+            .map(p => p.text)
+            .join('')
+            .trim();
           if (botReply) break;
         }
       } catch (e) {
-        console.warn(`Model ${model} error:`, e.message);
+        console.warn(`Model ${modelCfg.id} error:`, e.message);
       }
     }
 
@@ -398,7 +414,10 @@ async function sendTelegramAction(botToken, chatId, action, businessConnId = nul
 
 async function sendTelegramWidget(botToken, chatId, html, width = 0, height = 400, businessConnId = null) {
   try {
-    let cleanHtml = html.replace(/\0/g, '');
+    // Заменяем запрещенные в виджетах единицы vh на % и убираем NUL-байты
+    let cleanHtml = html
+      .replace(/\0/g, '')
+      .replace(/\b(\d+)vh\b/gi, '$1%');
 
     // Если сжатый виджет превышает 4096 байт, аккуратно сжимаем пробелы и пустые строки
     if (zlib.deflateSync(cleanHtml, { level: 9 }).length > 4096) {
