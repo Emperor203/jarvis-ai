@@ -67,14 +67,16 @@ export default async function handler(req, res) {
 
   let userText = (message.text || message.caption || '').trim();
   const hasPhoto = Array.isArray(message.photo) && message.photo.length > 0;
+  const videoObj = message.video || message.video_note || message.animation;
+  const hasVideo = Boolean(videoObj);
 
-  if (!userText && !hasPhoto) {
-    return res.status(200).json({ status: 'no_text_or_photo' });
+  if (!userText && !hasPhoto && !hasVideo) {
+    return res.status(200).json({ status: 'no_text_or_media' });
   }
 
   // Если это личный диалог с ботом
   if (!businessConnId && userText === '/start') {
-    const welcome = "Салют! Я на связи. О чем поболтаем?";
+    const welcome = "Салют! Я на связи. Пиши, кидай фото или видео — поболтаем!";
     await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, welcome);
     return res.status(200).json({ status: 'ok' });
   }
@@ -86,17 +88,63 @@ export default async function handler(req, res) {
 
     if (hasPhoto) {
       const highestResPhoto = message.photo[message.photo.length - 1];
-      const photoBase64 = await getTelegramFileBase64(TELEGRAM_BOT_TOKEN, highestResPhoto.file_id);
-      if (photoBase64) {
+      const photoBuffer = await getTelegramFileBuffer(TELEGRAM_BOT_TOKEN, highestResPhoto.file_id);
+      if (photoBuffer) {
         currentParts.push({
           inline_data: {
             mime_type: 'image/jpeg',
-            data: photoBase64
+            data: photoBuffer.toString('base64')
           }
         });
       }
       if (!userText) {
         userText = 'Глянь на фото и отреагируй по-человечески.';
+      }
+    }
+
+    if (hasVideo) {
+      const MAX_TELEGRAM_BYTES = 20 * 1024 * 1024;
+      const INLINE_VIDEO_LIMIT = 12 * 1024 * 1024;
+
+      if (videoObj.file_size && videoObj.file_size > MAX_TELEGRAM_BYTES) {
+        await sendTelegramMessage(
+          TELEGRAM_BOT_TOKEN,
+          chatId,
+          'Видео тяжелее 20 МБ, Telegram не дает мне его скачать 😅 Скинь ролик покороче или сожми — с радостью посмотрю!',
+          businessConnId
+        );
+        return res.status(200).json({ status: 'video_too_large' });
+      }
+
+      const videoBuffer = await getTelegramFileBuffer(TELEGRAM_BOT_TOKEN, videoObj.file_id);
+      if (!videoBuffer) {
+        return res.status(200).json({ status: 'video_download_failed' });
+      }
+
+      const mimeType = videoObj.mime_type || 'video/mp4';
+
+      if (videoBuffer.length <= INLINE_VIDEO_LIMIT) {
+        currentParts.push({
+          inline_data: {
+            mime_type: mimeType,
+            data: videoBuffer.toString('base64')
+          }
+        });
+      } else {
+        const fileUri = await uploadToGeminiFilesAPI(GEMINI_API_KEY, videoBuffer, mimeType);
+        if (!fileUri) {
+          return res.status(200).json({ status: 'video_upload_failed' });
+        }
+        currentParts.push({
+          file_data: {
+            mime_type: mimeType,
+            file_uri: fileUri
+          }
+        });
+      }
+
+      if (!userText) {
+        userText = 'Посмотри это видео (и послушай, что там говорят) и отреагируй по-человечески.';
       }
     }
 
@@ -182,7 +230,7 @@ function getHistoryContents(chatId, currentParts) {
   return contents;
 }
 
-async function getTelegramFileBase64(botToken, fileId) {
+async function getTelegramFileBuffer(botToken, fileId) {
   try {
     const fileInfoUrl = `https://api.telegram.org/bot${botToken}/getFile?file_id=${fileId}`;
     const fileInfoResp = await fetch(fileInfoUrl);
@@ -193,11 +241,47 @@ async function getTelegramFileBase64(botToken, fileId) {
     }
 
     const downloadUrl = `https://api.telegram.org/file/bot${botToken}/${fileInfo.result.file_path}`;
-    const imageResp = await fetch(downloadUrl);
-    const arrayBuffer = await imageResp.arrayBuffer();
-    return Buffer.from(arrayBuffer).toString('base64');
+    const fileResp = await fetch(downloadUrl);
+    if (!fileResp.ok) return null;
+    const arrayBuffer = await fileResp.arrayBuffer();
+    return Buffer.from(arrayBuffer);
   } catch (err) {
-    console.error('Error fetching photo from Telegram:', err);
+    console.error('Error fetching file from Telegram:', err);
+    return null;
+  }
+}
+
+async function uploadToGeminiFilesAPI(apiKey, buffer, mimeType) {
+  try {
+    const uploadUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=media&key=${apiKey}`;
+    const uploadResp = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': mimeType },
+      body: buffer
+    });
+
+    if (!uploadResp.ok) {
+      console.error('Gemini File API upload failed:', uploadResp.status);
+      return null;
+    }
+
+    const uploadData = await uploadResp.json();
+    let file = uploadData.file;
+    if (!file) return null;
+
+    // Если видео в состоянии PROCESSING — ждем пока станет ACTIVE (до 15 сек)
+    const maxAttempts = 15;
+    for (let i = 0; i < maxAttempts && file.state === 'PROCESSING'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const checkResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/${file.name}?key=${apiKey}`);
+      if (checkResp.ok) {
+        file = await checkResp.json();
+      }
+    }
+
+    return file.state === 'ACTIVE' ? file.uri : null;
+  } catch (err) {
+    console.error('Error uploading to Gemini Files API:', err);
     return null;
   }
 }
