@@ -33,12 +33,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ status: 'no_body' });
   }
 
-  // Обработка запросов из интерактивных виджетов (Bot API 10.4)
-  if (update.widget_query) {
-    await answerTelegramWidgetQuery(TELEGRAM_BOT_TOKEN, update.widget_query.id).catch(() => {});
-    return res.status(200).json({ status: 'widget_query_answered' });
-  }
-
   const message = update.message || update.business_message;
   if (!message) {
     return res.status(200).json({ status: 'no_message' });
@@ -205,49 +199,30 @@ export default async function handler(req, res) {
       return res.status(200).json({ status: 'no_reply_silence' });
     }
 
-    // Проверяем, сгенерировал ли бот интерактивный виджет <telegram_widget>
-    const widgetMatch = botReply.match(/<telegram_widget([^>]*)>([\s\S]*?)<\/telegram_widget>/i);
-    if (widgetMatch) {
-      const attrs = widgetMatch[1] || '';
-      let widgetHtml = widgetMatch[2].trim();
-      // Убираем случайные ```html ... ``` внутри тега
-      widgetHtml = widgetHtml.replace(/^```(?:html)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    // Проверяем, сгенерировал ли бот интерактивную игру/приложение (<telegram_widget> или <telegram_app>)
+    const gameMatch = botReply.match(/<telegram_(?:widget|app|game)[^>]*>([\s\S]*?)<\/telegram_(?:widget|app|game)>/i);
+    if (gameMatch) {
+      let gameHtml = gameMatch[1].trim();
+      gameHtml = gameHtml.replace(/^```(?:html)?\s*/i, '').replace(/\s*```$/i, '').trim();
 
-      // Всегда задаем максимально допустимый размер виджета Telegram (600x600)
-      const width = 600;
-      const height = 600;
+      const textOutside = botReply.replace(gameMatch[0], '').trim() || 'Готово! Запускай игру на весь экран 👇';
+      addHistoryTurn(chatId, 'model', `${textOutside} [Отправлена кнопка запуска игры]`);
 
-      const textOutside = botReply.replace(widgetMatch[0], '').trim();
-      addHistoryTurn(chatId, 'model', textOutside ? `${textOutside} [Отправлен интерактивный виджет]` : '[Отправлен интерактивный виджет]');
-
-      if (textOutside) {
-        await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, textOutside, businessConnId);
-      }
-
-      const widgetResult = await sendTelegramWidget(TELEGRAM_BOT_TOKEN, chatId, widgetHtml, width, height, businessConnId);
-
-      // Готовим ссылку на полноэкранный режим Mini App (/api/play?g=...)
       const host = req.headers['x-forwarded-host'] || req.headers.host || 'jarvis-ai-bice-one.vercel.app';
       const proto = req.headers['x-forwarded-proto'] || 'https';
-      const cleanForUrl = widgetHtml.replace(/\0/g, '').replace(/\b(\d+)vh\b/gi, '$1%');
+      const cleanForUrl = gameHtml.replace(/\0/g, '').replace(/\b(\d+)vh\b/gi, '$1%');
       const encodedGame = zlib.deflateRawSync(cleanForUrl, { level: 9 }).toString('base64url');
       const fullScreenUrl = `${proto}://${host}/api/play?g=${encodedGame}`;
 
-      if (!widgetResult.ok) {
-        console.warn('sendWidget failed:', widgetResult.description);
-        if (!businessConnId && encodedGame.length <= 4500) {
-          await sendTelegramWebAppButton(TELEGRAM_BOT_TOKEN, chatId, 'Запускай игру на весь экран 👇', fullScreenUrl);
-        } else {
-          await sendTelegramMessage(
-            TELEGRAM_BOT_TOKEN,
-            chatId,
-            `⚠️ Виджет не запустился (${widgetResult.description || 'ограничение Telegram'}). Вот готовый HTML-код:\n\n\`\`\`html\n${widgetHtml}\n\`\`\``,
-            businessConnId
-          );
-        }
-      } else if (!businessConnId && encodedGame.length <= 4500) {
-        // Если виджет отправился — сразу даем кнопку для разворачивания НА ВЕСЬ ЭКРАН (и со скриншотами!)
-        await sendTelegramWebAppButton(TELEGRAM_BOT_TOKEN, chatId, 'Хочешь на весь экран и без ограничений? Жми 👇', fullScreenUrl);
+      if (!businessConnId && encodedGame.length <= 4500) {
+        await sendTelegramWebAppButton(TELEGRAM_BOT_TOKEN, chatId, textOutside, fullScreenUrl);
+      } else {
+        await sendTelegramMessage(
+          TELEGRAM_BOT_TOKEN,
+          chatId,
+          `${textOutside}\n\n🔗 [Открыть игру](${fullScreenUrl})`,
+          businessConnId
+        );
       }
     } else {
       addHistoryTurn(chatId, 'model', botReply);
@@ -417,61 +392,6 @@ async function sendTelegramAction(botToken, chatId, action, businessConnId = nul
   });
 }
 
-async function sendTelegramWidget(botToken, chatId, html, width = 600, height = 540, businessConnId = null) {
-  try {
-    // Заменяем запрещенные в виджетах единицы vh на %, убираем NUL-байты и задаем полную ширину/высоту
-    const baseReset = '<style>html,body{margin:0;padding:0;width:100%;height:100%;box-sizing:border-box;overflow:hidden;}</style>';
-    let cleanHtml = baseReset + html
-      .replace(/\0/g, '')
-      .replace(/\b(\d+)vh\b/gi, '$1%');
-
-    // Если сжатый виджет превышает 4096 байт, аккуратно сжимаем пробелы и пустые строки
-    if (zlib.deflateSync(cleanHtml, { level: 9 }).length > 4096) {
-      cleanHtml = cleanHtml
-        .replace(/<!--[\s\S]*?-->/g, '')
-        .replace(/\n\s+/g, '\n')
-        .trim();
-    }
-
-    const telegramUrl = `https://api.telegram.org/bot${botToken}/sendWidget`;
-    const payload = {
-      chat_id: chatId,
-      html: cleanHtml
-    };
-
-    if (width >= 200 && width <= 600) {
-      payload.width = width;
-    }
-    if (height >= 50 && height <= 600) {
-      payload.height = height;
-    }
-    if (businessConnId) {
-      payload.business_connection_id = businessConnId;
-    }
-
-    const resp = await fetch(telegramUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await resp.json();
-    return data;
-  } catch (err) {
-    console.error('sendTelegramWidget error:', err);
-    return { ok: false, description: err.message };
-  }
-}
-
-async function answerTelegramWidgetQuery(botToken, widgetQueryId) {
-  const telegramUrl = `https://api.telegram.org/bot${botToken}/answerWidgetQuery`;
-  await fetch(telegramUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ widget_query_id: widgetQueryId })
-  });
-}
-
 async function sendTelegramWebAppButton(botToken, chatId, text, webAppUrl) {
   const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
   await fetch(telegramUrl, {
@@ -484,7 +404,7 @@ async function sendTelegramWebAppButton(botToken, chatId, text, webAppUrl) {
         inline_keyboard: [
           [
             {
-              text: '🎮 Открыть на весь экран',
+              text: '🎮 Запустить игру на весь экран',
               web_app: { url: webAppUrl }
             }
           ]
