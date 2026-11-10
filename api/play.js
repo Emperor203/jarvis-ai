@@ -1,13 +1,15 @@
 import zlib from 'zlib';
 
 export default function handler(req, res) {
-  const { g } = req.query;
-  if (!g || typeof g !== 'string') {
+  const { g, b } = req.query;
+  if ((!g || typeof g !== 'string') && (!b || typeof b !== 'string')) {
     return res.status(400).send('Game payload missing');
   }
 
   try {
-    const html = zlib.inflateRawSync(Buffer.from(g, 'base64url')).toString('utf-8');
+    const html = b
+      ? zlib.brotliDecompressSync(Buffer.from(b, 'base64url')).toString('utf-8')
+      : zlib.inflateRawSync(Buffer.from(g, 'base64url')).toString('utf-8');
 
     const fullPage = `<!DOCTYPE html>
 <html lang="ru">

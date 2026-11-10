@@ -205,24 +205,33 @@ export default async function handler(req, res) {
       let gameHtml = gameMatch[1].trim();
       gameHtml = gameHtml.replace(/^```(?:html)?\s*/i, '').replace(/\s*```$/i, '').trim();
 
-      const textOutside = botReply.replace(gameMatch[0], '').trim() || 'Готово! Запускай игру на весь экран 👇';
-      addHistoryTurn(chatId, 'model', `${textOutside} [Отправлена кнопка запуска игры]`);
+      const textOutside = botReply.replace(gameMatch[0], '').trim() || 'Готово! Запускай на весь экран 👇';
+      addHistoryTurn(chatId, 'model', `${textOutside} [Отправлена кнопка запуска]`);
 
       const host = req.headers['x-forwarded-host'] || req.headers.host || 'jarvis-ai-bice-one.vercel.app';
       const proto = req.headers['x-forwarded-proto'] || 'https';
-      const cleanForUrl = gameHtml.replace(/\0/g, '').replace(/\b(\d+)vh\b/gi, '$1%');
-      const encodedGame = zlib.deflateRawSync(cleanForUrl, { level: 9 }).toString('base64url');
-      const fullScreenUrl = `${proto}://${host}/api/play?g=${encodedGame}`;
+      const cleanForUrl = gameHtml
+        .replace(/\0/g, '')
+        .replace(/\b(\d+)vh\b/gi, '$1%')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/\n\s+/g, '\n')
+        .trim();
 
-      if (!businessConnId && encodedGame.length <= 4500) {
-        await sendTelegramWebAppButton(TELEGRAM_BOT_TOKEN, chatId, textOutside, fullScreenUrl);
-      } else {
-        await sendTelegramMessage(
-          TELEGRAM_BOT_TOKEN,
-          chatId,
-          `${textOutside}\n\n🔗 [Открыть игру](${fullScreenUrl})`,
-          businessConnId
-        );
+      // Сжимаем Brotli (на 25-30% плотнее deflate)
+      const encodedGame = zlib.brotliCompressSync(Buffer.from(cleanForUrl, 'utf-8'), {
+        params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 }
+      }).toString('base64url');
+      const fullScreenUrl = `${proto}://${host}/api/play?b=${encodedGame}`;
+
+      let sentButton = false;
+      if (!businessConnId && encodedGame.length <= 13000) {
+        const btnRes = await sendTelegramWebAppButton(TELEGRAM_BOT_TOKEN, chatId, textOutside, fullScreenUrl);
+        sentButton = Boolean(btnRes?.ok);
+      }
+
+      if (!sentButton) {
+        // Никогда не кидаем длинный base64-текст в чат — отправляем готовый HTML-файл!
+        await sendTelegramDocument(TELEGRAM_BOT_TOKEN, chatId, cleanForUrl, 'app.html', textOutside, businessConnId);
       }
     } else {
       addHistoryTurn(chatId, 'model', botReply);
@@ -393,23 +402,65 @@ async function sendTelegramAction(botToken, chatId, action, businessConnId = nul
 }
 
 async function sendTelegramWebAppButton(botToken, chatId, text, webAppUrl) {
-  const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
-  await fetch(telegramUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  try {
+    const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+    const payload = {
       chat_id: chatId,
       text: text,
+      parse_mode: 'Markdown',
       reply_markup: {
         inline_keyboard: [
           [
             {
-              text: '🎮 Запустить игру на весь экран',
+              text: '🎮 Запустить на весь экран',
               web_app: { url: webAppUrl }
             }
           ]
         ]
       }
-    })
-  });
+    };
+
+    let resp = await fetch(telegramUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    let data = await resp.json();
+    if (!data.ok && String(data.description || '').includes('parse entities')) {
+      delete payload.parse_mode;
+      resp = await fetch(telegramUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      data = await resp.json();
+    }
+    return data;
+  } catch (err) {
+    console.error('sendTelegramWebAppButton error:', err);
+    return { ok: false, description: err.message };
+  }
+}
+
+async function sendTelegramDocument(botToken, chatId, htmlContent, filename, caption, businessConnId = null) {
+  try {
+    const fullDoc = `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head><body style="margin:0;padding:0;background:#111822;color:#fff;">${htmlContent}</body></html>`;
+    const form = new FormData();
+    form.append('chat_id', String(chatId));
+    if (businessConnId) {
+      form.append('business_connection_id', businessConnId);
+    }
+    if (caption) {
+      form.append('caption', caption.slice(0, 1000));
+    }
+    form.append('document', new Blob([fullDoc], { type: 'text/html' }), filename);
+
+    await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
+      method: 'POST',
+      body: form
+    });
+  } catch (err) {
+    console.error('sendTelegramDocument error:', err);
+  }
 }
