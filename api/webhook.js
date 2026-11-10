@@ -1,15 +1,9 @@
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 
 // Хранилище контекста диалогов
 const chatHistories = new Map();
-
-// Время последней активности владельца во ВСЕМ Telegram (глобально)
-let lastGlobalOwnerActivity = 0;
-
-// Если владелец отправлял хоть одно сообщение в Telegram менее 3 минут назад — считаем его ОНЛАЙН и бот МОЛЧИТ!
-// Если прошло 3 минуты тишины от владельца — бот сразу же отвечает входящим сообщениям!
-const ONLINE_COOLDOWN_MS = 3 * 60 * 1000;
 
 function getSystemPrompt() {
   try {
@@ -37,6 +31,12 @@ export default async function handler(req, res) {
   const update = req.body;
   if (!update) {
     return res.status(200).json({ status: 'no_body' });
+  }
+
+  // Обработка запросов из интерактивных виджетов (Bot API 10.4)
+  if (update.widget_query) {
+    await answerTelegramWidgetQuery(TELEGRAM_BOT_TOKEN, update.widget_query.id).catch(() => {});
+    return res.status(200).json({ status: 'widget_query_answered' });
   }
 
   const message = update.message || update.business_message;
@@ -170,7 +170,7 @@ export default async function handler(req, res) {
             contents: contents,
             generationConfig: {
               temperature: 0.7,
-              maxOutputTokens: 2048
+              maxOutputTokens: 4096
             }
           })
         });
@@ -189,8 +189,49 @@ export default async function handler(req, res) {
       return res.status(200).json({ status: 'no_reply_silence' });
     }
 
-    addHistoryTurn(chatId, 'model', botReply);
-    await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, botReply, businessConnId);
+    // Проверяем, сгенерировал ли бот интерактивный виджет <telegram_widget>
+    const widgetMatch = botReply.match(/<telegram_widget([^>]*)>([\s\S]*?)<\/telegram_widget>/i);
+    if (widgetMatch) {
+      const attrs = widgetMatch[1] || '';
+      let widgetHtml = widgetMatch[2].trim();
+      // Убираем случайные ```html ... ``` внутри тега
+      widgetHtml = widgetHtml.replace(/^```(?:html)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+      const widthMatch = attrs.match(/width=["']?(\d+)["']?/i);
+      const heightMatch = attrs.match(/height=["']?(\d+)["']?/i);
+      const width = widthMatch ? parseInt(widthMatch[1], 10) : 0;
+      const height = heightMatch ? parseInt(heightMatch[1], 10) : 400;
+
+      const textOutside = botReply.replace(widgetMatch[0], '').trim();
+      addHistoryTurn(chatId, 'model', textOutside ? `${textOutside} [Отправлен интерактивный виджет]` : '[Отправлен интерактивный виджет]');
+
+      if (textOutside) {
+        await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, textOutside, businessConnId);
+      }
+
+      const widgetResult = await sendTelegramWidget(TELEGRAM_BOT_TOKEN, chatId, widgetHtml, width, height, businessConnId);
+      if (!widgetResult.ok) {
+        console.warn('sendWidget failed:', widgetResult.description);
+        // Если это Business-чат (где Telegram может ограничивать виджеты) или превышен размер
+        if (businessConnId) {
+          await sendTelegramMessage(
+            TELEGRAM_BOT_TOKEN,
+            chatId,
+            `⚠️ Интерактивные виджеты Telegram пока работают только в личке самого бота (@jarvis_otvet_bot). Отправляю кодом:\n\n\`\`\`html\n${widgetHtml}\n\`\`\``,
+            businessConnId
+          );
+        } else {
+          await sendTelegramMessage(
+            TELEGRAM_BOT_TOKEN,
+            chatId,
+            `⚠️ Не удалось запустить виджет (${widgetResult.description || 'ограничение размера 4 КБ'}). Вот готовый HTML-код:\n\n\`\`\`html\n${widgetHtml}\n\`\`\``
+          );
+        }
+      }
+    } else {
+      addHistoryTurn(chatId, 'model', botReply);
+      await sendTelegramMessage(TELEGRAM_BOT_TOKEN, chatId, botReply, businessConnId);
+    }
 
     return res.status(200).json({ status: 'ok' });
   } catch (error) {
@@ -352,5 +393,56 @@ async function sendTelegramAction(botToken, chatId, action, businessConnId = nul
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
+  });
+}
+
+async function sendTelegramWidget(botToken, chatId, html, width = 0, height = 400, businessConnId = null) {
+  try {
+    let cleanHtml = html.replace(/\0/g, '');
+
+    // Если сжатый виджет превышает 4096 байт, аккуратно сжимаем пробелы и пустые строки
+    if (zlib.deflateSync(cleanHtml, { level: 9 }).length > 4096) {
+      cleanHtml = cleanHtml
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/\n\s+/g, '\n')
+        .trim();
+    }
+
+    const telegramUrl = `https://api.telegram.org/bot${botToken}/sendWidget`;
+    const payload = {
+      chat_id: chatId,
+      html: cleanHtml
+    };
+
+    if (width >= 200 && width <= 600) {
+      payload.width = width;
+    }
+    if (height >= 50 && height <= 600) {
+      payload.height = height;
+    }
+    if (businessConnId) {
+      payload.business_connection_id = businessConnId;
+    }
+
+    const resp = await fetch(telegramUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await resp.json();
+    return data;
+  } catch (err) {
+    console.error('sendTelegramWidget error:', err);
+    return { ok: false, description: err.message };
+  }
+}
+
+async function answerTelegramWidgetQuery(botToken, widgetQueryId) {
+  const telegramUrl = `https://api.telegram.org/bot${botToken}/answerWidgetQuery`;
+  await fetch(telegramUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ widget_query_id: widgetQueryId })
   });
 }
