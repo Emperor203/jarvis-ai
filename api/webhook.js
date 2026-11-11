@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
+import { SFX_SCRIPT } from '../lib/sfx.js';
 
 // Хранилище контекста диалогов и текущего языка чата
 const chatHistories = new Map();
@@ -557,7 +558,7 @@ async function handleExportHtmlCallback(botToken, cq) {
 
 async function sendTelegramDocument(botToken, chatId, htmlContent, filename, caption, businessConnId = null) {
   try {
-    const fullDoc = `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head><body style="margin:0;padding:0;background:#111822;color:#fff;">${htmlContent}</body></html>`;
+    const fullDoc = `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">${SFX_SCRIPT}</head><body style="margin:0;padding:0;width:100vw;height:100vh;background:#111822;color:#fff;overflow:hidden;">${htmlContent}</body></html>`;
     const form = new FormData();
     form.append('chat_id', String(chatId));
     if (businessConnId) {

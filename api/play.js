@@ -1,4 +1,5 @@
 import zlib from 'zlib';
+import { SFX_SCRIPT } from '../lib/sfx.js';
 
 export default function handler(req, res) {
   const { g, b } = req.query;
@@ -63,6 +64,20 @@ export default function handler(req, res) {
       opacity: 0.75;
       font-weight: 600;
     }
+    #jarvis-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #sound-btn {
+      background: rgba(255,255,255,0.1);
+      color: var(--tg-theme-text-color, #ffffff);
+      border: none;
+      border-radius: 8px;
+      padding: 5px 9px;
+      font-size: 13px;
+      cursor: pointer;
+    }
     #share-btn {
       background: var(--tg-theme-button-color, #3b82f6);
       color: var(--tg-theme-button-text-color, #ffffff);
@@ -83,6 +98,7 @@ export default function handler(req, res) {
       flex-direction: column;
     }
   </style>
+  ${SFX_SCRIPT}
   <script>
     try {
       const tg = window.Telegram && window.Telegram.WebApp;
@@ -103,7 +119,10 @@ export default function handler(req, res) {
   <div id="mobile-shell">
     <div id="jarvis-bar">
       <span id="jarvis-brand">⚡ Jarvis</span>
-      <button id="share-btn" type="button">📤 Поделиться</button>
+      <div id="jarvis-actions">
+        <button id="sound-btn" type="button" title="Звук">🔊</button>
+        <button id="share-btn" type="button">📤 Поделиться</button>
+      </div>
     </div>
     <div id="game-root">
 ${html}
@@ -111,6 +130,15 @@ ${html}
   </div>
   <script>
     (function() {
+      const sfxBtn = document.getElementById('sound-btn');
+      if (sfxBtn && window.SFX) {
+        sfxBtn.textContent = window.SFX.muted ? '🔇' : '🔊';
+        sfxBtn.addEventListener('click', function() {
+          const isMuted = window.SFX.toggle();
+          sfxBtn.textContent = isMuted ? '🔇' : '🔊';
+          if (!isMuted) window.SFX.click();
+        });
+      }
       const btn = document.getElementById('share-btn');
       if (!btn) return;
       btn.addEventListener('click', async function() {
